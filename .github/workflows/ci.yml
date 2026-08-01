@@ -12,7 +12,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -35,7 +35,7 @@ jobs:
   container:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -48,7 +48,7 @@ jobs:
   helm:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: azure/setup-helm@v4
       - run: >-
           helm lint charts/pg-kms-gateway
@@ -70,7 +70,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d pgkms"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: {go-version-file: go.mod, cache: true}
       - name: Create protected schema
