@@ -65,6 +65,7 @@ jobs:
           format: sarif
           output: trivy.sarif
           severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
           exit-code: "1"
       - uses: actions/attest-build-provenance@v2
         with:
