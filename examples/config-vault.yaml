@@ -1,0 +1,24 @@
+listen: ":6432"
+health: ":8080"
+upstream:
+  address: "postgres.database.svc:5432"
+  tls: true
+  serverName: "postgres.database.svc"
+  caFile: "/etc/pgkms/tls/upstream-ca.crt"
+clientTLS:
+  required: true
+  certFile: "/etc/pgkms/tls/tls.crt"
+  keyFile: "/etc/pgkms/tls/tls.key"
+policyFile: "/etc/pgkms/policy/policy.yaml"
+bundleFile: "/etc/pgkms/bundle/bundle.json"
+metadataDSNEnv: "PGKMS_METADATA_DSN"
+kms:
+  provider: vault-transit
+  keyRef: "pg-kms-gateway"
+  vault:
+    address: "https://vault.security.svc:8200"
+    mount: "transit"
+    tokenEnv: "VAULT_TOKEN"
+limits:
+  messageBytes: 67108864
+  dialTimeout: 10s

@@ -1,0 +1,65 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/vendora-bit/pg-kms-gateway
+  tag: ""
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 5432
+
+config:
+  upstreamAddress: "postgres.database.svc:5432"
+  upstreamTLS: true
+  upstreamServerName: "postgres.database.svc"
+  kmsProvider: vault-transit
+  kmsKeyRef: pg-kms-gateway
+  vaultAddress: "https://vault.security.svc:8200"
+  vaultMount: transit
+  vaultTokenEnv: VAULT_TOKEN
+  awsRegion: ""
+  azureVaultURL: ""
+  azureAlgorithm: "RSA-OAEP-256"
+  metadataDSNEnv: PGKMS_METADATA_DSN
+  messageBytes: 67108864
+  dialTimeout: 10s
+
+policy: ""
+
+secrets:
+  bundleSecretName: pg-kms-gateway-bundle
+  bundleKey: bundle.json
+  credentialsSecretName: pg-kms-gateway-credentials
+  metadataDSNKey: metadata-dsn
+  vaultTokenKey: vault-token
+  clientTLSSecretName: ""
+  upstreamCASecretName: ""
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: "2", memory: 1Gi}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector: {}
+  upstreamNamespaceSelector: {}
+  kmsNamespaceSelector: {}
+  upstreamPort: 5432
+  vaultPort: 8200
+  allowExternalHTTPS: true
+  upstreamCIDRs: []
+  kmsCIDRs: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

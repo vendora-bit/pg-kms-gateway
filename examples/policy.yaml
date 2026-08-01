@@ -1,0 +1,26 @@
+apiVersion: pgkms.dev/v1
+kind: FieldEncryptionPolicy
+metadata:
+  name: customer-pii
+spec:
+  keyDomain: production.customer-pii
+  columns:
+    - schema: public
+      table: users
+      column: email
+      mode: random
+      normalize: lowercase-trim
+      blindIndex: email_bidx
+    - schema: public
+      table: users
+      column: external_id
+      mode: deterministic
+      normalize: trim
+    - schema: public
+      table: profiles
+      column: document
+      mode: random
+      jsonPaths:
+        - $.firstName
+        - $.lastName
+        - $.phone

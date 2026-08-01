@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: formatting
+        run: test -z "$(gofmt -l .)"
+      - name: unit and race tests
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: go build -trimpath ./cmd/pg-kms-gateway
+      - name: fuzz smoke
+        run: go test ./internal/recordcrypt -run '^$' -fuzz FuzzParseNeverPanics -fuzztime 20s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: pg-kms-gateway:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: >-
+          helm lint charts/pg-kms-gateway
+          --set-string policy='apiVersion: pgkms.dev/v1\nkind: FieldEncryptionPolicy'
+      - run: >-
+          helm template test charts/pg-kms-gateway
+          --set-string policy='apiVersion: pgkms.dev/v1\nkind: FieldEncryptionPolicy' >/dev/null
+
+  integration:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pgkms-test
+          POSTGRES_DB: pgkms
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pgkms"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod, cache: true}
+      - name: Create protected schema
+        env: {PGPASSWORD: pgkms-test}
+        run: psql -h 127.0.0.1 -U postgres -d pgkms -v ON_ERROR_STOP=1 -c 'CREATE TABLE users (id bigserial PRIMARY KEY, email text, email_bidx text, external_id text);'
+      - name: PostgreSQL wire E2E
+        env:
+          PGKMS_E2E_DSN: postgres://postgres:pgkms-test@127.0.0.1:5432/pgkms?sslmode=disable
+          PGKMS_E2E_ADDRESS: 127.0.0.1:5432
+        run: go test -tags=integration -run TestPostgreSQLWireEndToEnd -v ./integration

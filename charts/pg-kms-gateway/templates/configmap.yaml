@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pgkms.fullname" . }}
+  labels:
+    {{- include "pgkms.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    listen: ":6432"
+    health: ":8080"
+    upstream:
+      address: {{ .Values.config.upstreamAddress | quote }}
+      tls: {{ .Values.config.upstreamTLS }}
+      serverName: {{ .Values.config.upstreamServerName | quote }}
+      {{- if .Values.secrets.upstreamCASecretName }}
+      caFile: /etc/pgkms/upstream-ca/ca.crt
+      {{- end }}
+    clientTLS:
+      required: {{ ne .Values.secrets.clientTLSSecretName "" }}
+      {{- if .Values.secrets.clientTLSSecretName }}
+      certFile: /etc/pgkms/client-tls/tls.crt
+      keyFile: /etc/pgkms/client-tls/tls.key
+      {{- end }}
+    policyFile: /etc/pgkms/policy/policy.yaml
+    bundleFile: /etc/pgkms/bundle/bundle.json
+    metadataDSNEnv: {{ .Values.config.metadataDSNEnv | quote }}
+    kms:
+      provider: {{ .Values.config.kmsProvider | quote }}
+      keyRef: {{ .Values.config.kmsKeyRef | quote }}
+      {{- if eq .Values.config.kmsProvider "vault-transit" }}
+      vault:
+        address: {{ .Values.config.vaultAddress | quote }}
+        mount: {{ .Values.config.vaultMount | quote }}
+        tokenEnv: {{ .Values.config.vaultTokenEnv | quote }}
+      {{- else if eq .Values.config.kmsProvider "aws-kms" }}
+      aws:
+        region: {{ required "config.awsRegion is required for aws-kms" .Values.config.awsRegion | quote }}
+      {{- else if eq .Values.config.kmsProvider "azure-key-vault" }}
+      azure:
+        vaultURL: {{ required "config.azureVaultURL is required for azure-key-vault" .Values.config.azureVaultURL | quote }}
+        algorithm: {{ .Values.config.azureAlgorithm | quote }}
+      {{- end }}
+    limits:
+      messageBytes: {{ .Values.config.messageBytes }}
+      dialTimeout: {{ .Values.config.dialTimeout }}
+  policy.yaml: |
+    {{- required "policy must be supplied" .Values.policy | nindent 4 }}

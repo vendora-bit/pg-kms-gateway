@@ -1,0 +1,6 @@
+/pg-kms-gateway
+/dist/
+*.test
+*.prof
+.DS_Store
+.env
