@@ -15,6 +15,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /out/pg-kms-gateway ./cmd/pg-kms-gateway
 
 FROM gcr.io/distroless/cc-debian12:nonroot
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="pg-kms-gateway" \
+      org.opencontainers.image.description="Policy-driven PostgreSQL field encryption gateway backed by KMS" \
+      org.opencontainers.image.source="https://github.com/vendora-bit/pg-kms-gateway" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/pg-kms-gateway /usr/local/bin/pg-kms-gateway
 USER 65532:65532
 EXPOSE 6432 8080

@@ -1,9 +1,75 @@
 # pg-kms-gateway
 
+> Part of [Vendora Infrastructure](https://github.com/vendora-bit) — small, secure and production-minded tools for databases and self-hosted infrastructure.
+
+[![CI](https://github.com/vendora-bit/pg-kms-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/vendora-bit/pg-kms-gateway/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vendora-bit/pg-kms-gateway?display_name=release)](https://github.com/vendora-bit/pg-kms-gateway/releases)
+[![Container](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/vendora-bit/pg-kms-gateway/pkgs/container/pg-kms-gateway)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 `pg-kms-gateway` is an application-agnostic PostgreSQL wire gateway for
 field-level encryption. Applications keep using PostgreSQL v3; the gateway
 parses SQL, encrypts policy-selected bind parameters before writes, and
 decrypts proven result columns on reads.
+
+![A successful real policy check](assets/policy-check.png)
+
+## Why pg-kms-gateway
+
+Adding encryption to a PostgreSQL application often couples every client to a
+crypto SDK, KMS provider and schema convention. This gateway keeps the
+PostgreSQL wire protocol at the application boundary while enforcing an
+explicit, checked policy at a single point.
+
+| Capability | pg-kms-gateway | Application-side crypto library | Transparent disk encryption |
+| --- | --- | --- | --- |
+| Field-level ciphertext | Yes | Yes, per application | No |
+| PostgreSQL driver stays unchanged | Yes | No | Yes |
+| KMS-backed envelope keys | Yes | Depends on each client | Not field-level |
+| Policy and schema validation before ready | Yes | Custom implementation | No |
+| Equality without plaintext | Opt-in blind index | Custom implementation | No |
+| Explicitly rejects unsafe SQL | Yes | Varies | N/A |
+
+## Quickstart — validate a policy in two minutes
+
+The full gateway requires a PostgreSQL schema, a KMS provider and a reviewed
+policy; do not point it at production as a first step. Start by running the
+same validation the service uses before becoming ready:
+
+```bash
+git clone https://github.com/vendora-bit/pg-kms-gateway.git
+cd pg-kms-gateway
+docker build -t pg-kms-gateway:local .
+docker run --rm \
+  -v "$PWD/examples/policy.yaml:/work/policy.yaml:ro" \
+  --entrypoint /usr/local/bin/pg-kms-gateway \
+  pg-kms-gateway:local policy-check --policy /work/policy.yaml
+```
+
+The release image is available after the first public release:
+
+```bash
+docker run --rm ghcr.io/vendora-bit/pg-kms-gateway:latest version
+```
+
+Then read the [design](docs/design.md), [threat model](docs/threat-model.md),
+[Vault configuration](examples/config-vault.yaml) and [Helm chart](charts/pg-kms-gateway/)
+before configuring `serve`.
+
+## Why not use X?
+
+**Use application-side encryption** when you control every writer and reader,
+need application-specific transformations, and can safely operate crypto/KMS
+logic in each client. This gateway is for teams that need one policy-enforced
+PostgreSQL protocol boundary.
+
+**Use PostgreSQL disk or volume encryption** when your concern is stolen media
+or backups at rest. It does not protect selected fields from ordinary database
+read access, so it is complementary rather than equivalent.
+
+**Use a general database proxy** when you only need pooling, routing or TLS.
+This gateway intentionally understands a bounded subset of PostgreSQL SQL to
+fail closed for protected fields; it is not a drop-in replacement for PgBouncer.
 
 This project is an independent clean implementation with its own source layout,
 protocol state machine, policy, envelope, key bundle, tests, and documentation.
@@ -122,3 +188,28 @@ signs multi-architecture images with Cosign.
 
 See [`docs/design.md`](docs/design.md), [`SECURITY.md`](SECURITY.md), the
 [`Dockerfile`](Dockerfile), and the [`Helm chart`](charts/pg-kms-gateway).
+
+## Roadmap
+
+- [x] PostgreSQL v3 protocol gateway, policy enforcement and KMS-backed envelope keys
+- [x] Vault, AWS, GCP and Azure KMS providers; Helm, SBOM, provenance and signing
+- [ ] More production rollout recipes and policy schema reference
+- [ ] Additional explicitly proven SQL forms, added only with negative coverage
+- [ ] Pluggable external authorization decision point
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the prepared
+[good first issues](.github/GOOD_FIRST_ISSUES.md).
+
+## Release and license
+
+The current code and Helm chart version is `0.1.0`. Pushing a signed `v0.1.0`
+tag publishes a signed multi-architecture GHCR image, SBOM, provenance, Helm
+chart and GitHub Release. See [CHANGELOG.md](CHANGELOG.md).
+
+Released under [Apache-2.0](LICENSE). See [SECURITY.md](SECURITY.md) for
+private vulnerability reporting.
+
+## Related tools
+
+- [cert-renewer](https://github.com/vendora-bit/cert-renewer) — safe multi-lineage Let's Encrypt reconciliation.
+- [ddns-updater](https://github.com/vendora-bit/ddns-updater) — safe Cloudflare DDNS synchronization.

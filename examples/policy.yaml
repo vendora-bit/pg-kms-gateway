@@ -1,7 +1,7 @@
 apiVersion: pgkms.dev/v1
 kind: FieldEncryptionPolicy
 metadata:
-  name: customer-pii
+  name: customer_pii
 spec:
   keyDomain: production.customer-pii
   columns:
