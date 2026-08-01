@@ -78,13 +78,9 @@ func AnalyzeWithKeyIDs(sql string, catalog *policy.Catalog, keyIDs []string) (Pl
 	case stmt.GetDeleteStmt() != nil:
 		err = planner.deleteStatement(stmt.GetDeleteStmt())
 	case stmt.GetMergeStmt() != nil:
-		if planner.relationProtected(stmt.GetMergeStmt().Relation) {
-			err = fmt.Errorf("%w: MERGE on protected relations is not supported", ErrUnsafeQuery)
-		}
+		err = fmt.Errorf("%w: MERGE is not supported by the gateway", ErrUnsafeQuery)
 	case stmt.GetCopyStmt() != nil:
-		if planner.relationProtected(stmt.GetCopyStmt().Relation) {
-			err = fmt.Errorf("%w: COPY on protected relations is forbidden", ErrUnsafeQuery)
-		}
+		err = fmt.Errorf("%w: COPY is not supported by the gateway", ErrUnsafeQuery)
 	case stmt.GetTransactionStmt() != nil, stmt.GetVariableSetStmt() != nil, stmt.GetVariableShowStmt() != nil:
 		// Transaction control and session-local configuration carry no row data.
 	default:
@@ -366,6 +362,9 @@ func (p *planner) where(relation relationID, node *pgquery.Node) error {
 	}
 	field, protected := p.catalog.Lookup(policy.Identity{Schema: relation.Schema, Table: relation.Table, Column: column})
 	if !protected {
+		if referencesProtected(node, relation, p.catalog) {
+			return fmt.Errorf("%w: protected predicates require a direct column reference", ErrUnsafeQuery)
+		}
 		return nil
 	}
 	if !isEquality(expr) || parameter == nil {
@@ -517,6 +516,9 @@ func columnName(node *pgquery.Node, relation relationID) string {
 	if len(fields) == 2 && fields[0].GetString_() != nil && fields[1].GetString_() != nil && fields[0].GetString_().Sval == relation.Qualifier {
 		return fields[1].GetString_().Sval
 	}
+	if len(fields) == 3 && relation.Qualifier == relation.Table && fields[0].GetString_() != nil && fields[1].GetString_() != nil && fields[2].GetString_() != nil && fields[0].GetString_().Sval == relation.Schema && fields[1].GetString_().Sval == relation.Table {
+		return fields[2].GetString_().Sval
+	}
 	return ""
 }
 
@@ -542,6 +544,9 @@ func referencesProtected(node *pgquery.Node, relation relationID, catalog *polic
 		if ref, ok := message.Interface().(*pgquery.ColumnRef); ok {
 			wrapper := &pgquery.Node{Node: &pgquery.Node_ColumnRef{ColumnRef: ref}}
 			name := columnName(wrapper, relation)
+			if name == "" && len(ref.Fields) > 0 && ref.Fields[len(ref.Fields)-1].GetString_() != nil {
+				name = ref.Fields[len(ref.Fields)-1].GetString_().Sval
+			}
 			if _, protected := catalog.Lookup(policy.Identity{Schema: relation.Schema, Table: relation.Table, Column: name}); protected {
 				found = true
 				return

@@ -11,9 +11,9 @@ bundle alone is insufficient without KMS authorization.
 ## Trusted
 
 The gateway process necessarily sees plaintext and unwrapped data keys in
-memory. The application, gateway workload identity, gateway host, release
-pipeline, policy, and KMS authorization are trusted. TLS endpoints see their
-respective plaintext protocol traffic.
+memory. The application authorization layer, gateway workload identity,
+gateway host, release pipeline, policy, bundle and KMS authorization are
+trusted. TLS endpoints see their respective plaintext protocol traffic.
 
 ## Not protected
 
@@ -23,6 +23,11 @@ or an administrator who controls both KMS and the running gateway. Equality
 features reveal repetitions and frequency. Length is visible within AEAD
 overhead. Access patterns, table names, non-protected columns, row counts, and
 query timing remain visible to PostgreSQL.
+
+Terminated SCRAM prevents the application from learning the PostgreSQL
+credential. It does not replace NetworkPolicy or database authorization.
+Relay mode assumes network controls alone prevent direct database access and
+is outside the recommended production boundary.
 
 ## Failure behavior
 

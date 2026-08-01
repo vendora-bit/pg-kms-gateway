@@ -42,6 +42,14 @@ spec:
             - name: {{ .Values.config.metadataDSNEnv }}
               valueFrom:
                 secretKeyRef: {name: {{ .Values.secrets.credentialsSecretName }}, key: {{ .Values.secrets.metadataDSNKey }}}
+            {{- if eq .Values.config.authenticationMode "terminate-scram" }}
+            - name: {{ .Values.config.clientPasswordEnv }}
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.secrets.credentialsSecretName }}, key: {{ .Values.secrets.clientPasswordKey }} }
+            - name: {{ .Values.config.upstreamPasswordEnv }}
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.secrets.credentialsSecretName }}, key: {{ .Values.secrets.upstreamPasswordKey }} }
+            {{- end }}
             {{- if eq .Values.config.kmsProvider "vault-transit" }}
             - name: {{ .Values.config.vaultTokenEnv }}
               valueFrom:

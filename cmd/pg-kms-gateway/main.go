@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/vendora-bit/pg-kms-gateway/internal/appconfig"
+	"github.com/vendora-bit/pg-kms-gateway/internal/corpus"
 	"github.com/vendora-bit/pg-kms-gateway/internal/gateway"
 	"github.com/vendora-bit/pg-kms-gateway/internal/operator"
 	"github.com/vendora-bit/pg-kms-gateway/internal/origin"
@@ -45,13 +46,15 @@ func main() {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: pg-kms-gateway <serve|policy-check|backfill|reencrypt|verify|keys-init|keys-rotate|keys-rewrap|keys-prune|version>")
+		return errors.New("usage: pg-kms-gateway <serve|policy-check|corpus-verify|backfill|reencrypt|verify|keys-init|keys-rotate|keys-rewrap|keys-prune|version>")
 	}
 	switch arguments[0] {
 	case "serve":
 		return serve(arguments[1:])
 	case "policy-check":
 		return policyCheck(arguments[1:])
+	case "corpus-verify":
+		return corpusVerify(arguments[1:])
 	case "keys-init", "keys-rotate", "keys-rewrap":
 		return keys(arguments[0], arguments[1:])
 	case "keys-prune":
@@ -64,6 +67,36 @@ func run(arguments []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", arguments[0])
 	}
+}
+
+func corpusVerify(arguments []string) error {
+	set := flag.NewFlagSet("corpus-verify", flag.ContinueOnError)
+	policyPath := set.String("policy", "", "path to policy YAML")
+	corpusPath := set.String("corpus", "", "path to corpus JSON")
+	if err := set.Parse(arguments); err != nil {
+		return err
+	}
+	if *policyPath == "" || *corpusPath == "" || set.NArg() != 0 {
+		return errors.New("corpus-verify: exactly --policy and --corpus are required")
+	}
+	document, err := policy.Load(*policyPath)
+	if err != nil {
+		return err
+	}
+	catalog, err := policy.Compile(document)
+	if err != nil {
+		return err
+	}
+	queries, err := corpus.Load(*corpusPath)
+	if err != nil {
+		return err
+	}
+	report, verifyErr := corpus.Verify(queries, catalog)
+	fmt.Printf("profile=%s total=%d supported=%d rejected=%d failed=%d\n", queries.Profile, report.Total, report.Supported, report.Rejected, report.Failed)
+	if verifyErr != nil {
+		return fmt.Errorf("corpus-verify: %w", verifyErr)
+	}
+	return nil
 }
 
 func pruneKeys(arguments []string) error {
@@ -202,7 +235,7 @@ func operate(command string, arguments []string) error {
 	}
 	var total operator.Stats
 	for _, field := range catalog.Fields() {
-		stats, err := engine.RunField(ctx, field, mode)
+		stats, verification, err := engine.RunAndVerifyField(ctx, field, mode)
 		if err != nil {
 			return err
 		}
@@ -210,7 +243,7 @@ func operate(command string, arguments []string) error {
 		total.Updated += stats.Updated
 		total.Unchanged += stats.Unchanged
 		total.Conflicted += stats.Conflicted
-		fmt.Printf("%s.%s.%s: scanned=%d updated=%d unchanged=%d conflicted=%d\n", field.Schema, field.Table, field.Column, stats.Scanned, stats.Updated, stats.Unchanged, stats.Conflicted)
+		fmt.Printf("%s.%s.%s: scanned=%d updated=%d unchanged=%d conflicted=%d verified=%d\n", field.Schema, field.Table, field.Column, stats.Scanned, stats.Updated, stats.Unchanged, stats.Conflicted, verification.Scanned)
 	}
 	fmt.Printf("total: scanned=%d updated=%d unchanged=%d conflicted=%d\n", total.Scanned, total.Updated, total.Unchanged, total.Conflicted)
 	return nil
@@ -365,12 +398,27 @@ func serve(arguments []string) error {
 		return err
 	}
 	metrics := &telemetry.Metrics{}
+	var terminateAuth *gateway.TerminationAuth
+	if config.Authentication.Mode == "terminate-scram" {
+		clientPassword := os.Getenv(config.Authentication.ClientPasswordEnv)
+		upstreamPassword := os.Getenv(config.Authentication.UpstreamPasswordEnv)
+		if clientPassword == "" || upstreamPassword == "" {
+			return errors.New("serve: authentication password environment variables must be set")
+		}
+		terminateAuth = &gateway.TerminationAuth{
+			ClientUsername: config.Authentication.ClientUsername, ClientPassword: clientPassword,
+			UpstreamUsername: config.Authentication.UpstreamUsername, UpstreamPassword: upstreamPassword,
+			UpstreamDatabase: config.Authentication.UpstreamDatabase,
+		}
+	}
 	server, err := gateway.New(gateway.Config{
-		UpstreamAddress: config.Upstream.Address, ClientTLS: clientTLS, RequireClientTLS: config.ClientTLS.Required,
+		UpstreamAddress: config.Upstream.Address, ClientTLS: clientTLS, RequireClientTLS: config.ClientTLS.IsRequired(),
 		UpstreamTLS: upstreamTLS, RequireUpstreamTLS: config.Upstream.TLS, DialTimeout: time.Duration(config.Limits.DialTimeout),
 		MaxMessageBytes: config.Limits.MessageBytes,
+		MaxConnections:  config.Limits.MaxConnections,
 		NewMachine:      func() (*pgsession.Machine, error) { return pgsession.New(catalog, keyring, resolver, metrics) },
 		Metrics:         metrics,
+		TerminateAuth:   terminateAuth,
 	})
 	if err != nil {
 		return err

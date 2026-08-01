@@ -64,6 +64,11 @@ func TestUnsafeProtectedFormsFailClosed(t *testing.T) {
 		`INSERT INTO users (email) VALUES ('literal@example.com')`,
 		`UPDATE users SET email = lower($1)`,
 		`SELECT lower(email) FROM users`,
+		`SELECT id FROM users WHERE lower(email) = $1`,
+		`SELECT id FROM users WHERE coalesce(email, '') = $1`,
+		`SELECT id FROM users WHERE $1 = trim(users.email)`,
+		`SELECT id FROM users WHERE (email || '') = $1`,
+		`SELECT id FROM users WHERE lower(public.users.email) = $1`,
 		`SELECT email FROM users WHERE email LIKE $1`,
 		`COPY users TO STDOUT`,
 		`MERGE INTO users USING staged ON users.external_id = staged.id WHEN MATCHED THEN UPDATE SET email = staged.email`,
@@ -79,6 +84,42 @@ func TestUnsafeProtectedFormsFailClosed(t *testing.T) {
 			t.Errorf("%q: expected unsafe-query error, got %v", query, err)
 		}
 	}
+}
+
+func TestSchemaQualifiedProtectedPredicate(t *testing.T) {
+	plan, err := Analyze(`SELECT email FROM public.users WHERE public.users.email = $1`, catalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Parameters) != 1 || plan.Parameters[0].Op != ComputeBlindIndex || !strings.Contains(plan.SQL, "email_bidx") {
+		t.Fatalf("schema-qualified predicate was not transformed: %+v", plan)
+	}
+}
+
+func FuzzProtectedPredicateExpressionsFailClosed(f *testing.F) {
+	wrappers := []func(string) string{
+		func(column string) string { return "lower(" + column + ") = $1" },
+		func(column string) string { return "coalesce(" + column + ", '') = $1" },
+		func(column string) string { return "(" + column + " || '') = $1" },
+		func(column string) string { return "length(" + column + ") = $1" },
+		func(column string) string { return "$1 = trim(" + column + ")" },
+		func(column string) string {
+			return "CASE WHEN " + column + " IS NULL THEN '' ELSE " + column + " END = $1"
+		},
+	}
+	for index := range wrappers {
+		f.Add(uint8(index), index%2 == 0)
+	}
+	f.Fuzz(func(t *testing.T, wrapper uint8, qualified bool) {
+		column := "email"
+		if qualified {
+			column = "public.users.email"
+		}
+		query := `SELECT id FROM users WHERE ` + wrappers[int(wrapper)%len(wrappers)](column)
+		if _, parseErr := Analyze(query, catalog(t)); parseErr == nil {
+			t.Fatalf("protected column hidden in predicate was accepted: %s", query)
+		}
+	})
 }
 
 func TestUnprotectedQueryPassesThrough(t *testing.T) {

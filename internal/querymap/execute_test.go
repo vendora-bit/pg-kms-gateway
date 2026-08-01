@@ -70,6 +70,26 @@ func TestMalformedReservedResultFailsClosed(t *testing.T) {
 	}
 }
 
+func TestReservedPrefixPlaintextParameterIsEncryptedNormally(t *testing.T) {
+	plan, err := Analyze(`INSERT INTO users (email) VALUES ($1) RETURNING email`, catalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyring := executionKeyring(t)
+	literal := []byte("$PGXENC$ is part of the user's text")
+	parameters, err := ApplyParameters(plan, keyring, "tenant-a", [][]byte{literal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(parameters[0], literal) || !strings.HasPrefix(string(parameters[0]), recordcrypt.Prefix+"2:") {
+		t.Fatalf("reserved-prefix plaintext was not encrypted: %q", parameters[0])
+	}
+	row, err := ApplyResults(plan.Results, keyring, "tenant-a", [][]byte{parameters[0]})
+	if err != nil || !bytes.Equal(row[0], literal) {
+		t.Fatalf("reserved-prefix plaintext did not round trip: %q, %v", row, err)
+	}
+}
+
 func TestEqualityExpandsAcrossDecryptableKeyVersions(t *testing.T) {
 	oldMaterial, err := recordcrypt.GenerateMaterial()
 	if err != nil {

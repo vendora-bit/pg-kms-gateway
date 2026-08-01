@@ -1,0 +1,27 @@
+apiVersion: pgkms.dev/v1
+kind: FieldEncryptionPolicy
+metadata:
+  name: keycloak_26_core_pii
+spec:
+  keyDomain: keycloak.26.core-pii
+  columns:
+    - schema: public
+      table: user_entity
+      column: username
+      mode: deterministic
+      description: Login identifier; equality leakage is accepted for exact lookup.
+    - schema: public
+      table: user_entity
+      column: email
+      mode: deterministic
+      description: Email address; equality leakage is accepted for exact lookup.
+    - schema: public
+      table: user_entity
+      column: first_name
+      mode: random
+      description: User first name; search through the encrypted endpoint is intentionally unsupported.
+    - schema: public
+      table: user_entity
+      column: last_name
+      mode: random
+      description: User last name; search through the encrypted endpoint is intentionally unsupported.

@@ -28,7 +28,15 @@ config:
   azureAlgorithm: "RSA-OAEP-256"
   metadataDSNEnv: PGKMS_METADATA_DSN
   messageBytes: 67108864
+  maxConnections: 1024
   dialTimeout: 10s
+  clientTLSRequired: true
+  authenticationMode: terminate-scram
+  clientUsername: application
+  clientPasswordEnv: PGKMS_CLIENT_PASSWORD
+  upstreamUsername: pg_kms_gateway
+  upstreamPasswordEnv: PGKMS_UPSTREAM_PASSWORD
+  upstreamDatabase: app
 
 policy: ""
 
@@ -38,7 +46,10 @@ secrets:
   credentialsSecretName: pg-kms-gateway-credentials
   metadataDSNKey: metadata-dsn
   vaultTokenKey: vault-token
-  clientTLSSecretName: ""
+  clientPasswordKey: client-password
+  upstreamPasswordKey: upstream-password
+  clientTLSSecretName: pg-kms-gateway-client-tls
+  clientTLSClientCAKey: ""
   upstreamCASecretName: ""
 
 resources:
@@ -51,12 +62,24 @@ podDisruptionBudget:
 
 networkPolicy:
   enabled: true
-  ingressNamespaceSelector: {}
-  upstreamNamespaceSelector: {}
-  kmsNamespaceSelector: {}
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: pg-kms-clients
+  healthNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: monitoring
+  dnsNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: kube-system
+  upstreamNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: database
+  kmsNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: security
   upstreamPort: 5432
   vaultPort: 8200
-  allowExternalHTTPS: true
+  allowExternalHTTPS: false
   upstreamCIDRs: []
   kmsCIDRs: []
 

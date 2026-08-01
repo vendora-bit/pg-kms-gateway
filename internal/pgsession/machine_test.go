@@ -164,3 +164,235 @@ func TestEnvelopeCannotLeakFromUnprovenResult(t *testing.T) {
 		t.Fatalf("expected envelope leak rejection, got %v", err)
 	}
 }
+
+func TestPipelinedExecutionsUseFIFOResultPlans(t *testing.T) {
+	m := machine(t)
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "protected", Query: `SELECT email FROM users`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{DestinationPortal: "protected", PreparedStatement: "protected"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Execute{Portal: "protected"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "plain", Query: `SELECT title FROM posts`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{DestinationPortal: "plain", PreparedStatement: "plain"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Execute{Portal: "plain"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.Backend(&pgproto3.ParseComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.BindComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("email"), Format: pgproto3.TextFormat}}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := recordcrypt.Context{Domain: "tenant-a", Schema: "public", Table: "users", Column: "email"}
+	ciphertext, err := m.keyring.EncryptRandom(ctx, []byte("first@example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := m.Backend(&pgproto3.DataRow{Values: [][]byte{[]byte(ciphertext)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(row.(*pgproto3.DataRow).Values[0]); got != "first@example.com" {
+		t.Fatalf("first pipelined result used the wrong plan: %q", got)
+	}
+	if _, err := m.Backend(&pgproto3.CommandComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParseComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.BindComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("title"), Format: pgproto3.TextFormat}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.DataRow{Values: [][]byte{[]byte("second")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.CommandComplete{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPortalSuspensionRetainsResultPlan(t *testing.T) {
+	m := machine(t)
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "paged", Query: `SELECT email FROM users`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParseComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{DestinationPortal: "paged", PreparedStatement: "paged"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.BindComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Execute{Portal: "paged", MaxRows: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("email"), Format: pgproto3.TextFormat}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.PortalSuspended{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Execute{Portal: "paged", MaxRows: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := recordcrypt.Context{Domain: "tenant-a", Schema: "public", Table: "users", Column: "email"}
+	ciphertext, err := m.keyring.EncryptRandom(ctx, []byte("next@example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := m.Backend(&pgproto3.DataRow{Values: [][]byte{[]byte(ciphertext)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(row.(*pgproto3.DataRow).Values[0]); got != "next@example.com" {
+		t.Fatalf("resumed portal lost its result plan: %q", got)
+	}
+	if _, err := m.Backend(&pgproto3.CommandComplete{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPipelineErrorRollsBackProvisionalObjectsInReverseOrder(t *testing.T) {
+	m := machine(t)
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "same", Query: `SELECT email FROM users`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "same", Query: `SELECT title FROM posts`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{DestinationPortal: "same", PreparedStatement: "same"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Sync{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ErrorResponse{Message: "first parse failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ReadyForQuery{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{PreparedStatement: "same"}); !errors.Is(err, ErrProtocolSafety) {
+		t.Fatalf("failed pipelined statement remained visible: %v", err)
+	}
+}
+
+func TestErrorStopsAtFirstPipelineSyncBoundary(t *testing.T) {
+	m := machine(t)
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "first", Query: `SELECT email FROM users`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Sync{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "second", Query: `SELECT title FROM posts`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Sync{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ErrorResponse{Message: "first batch failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ReadyForQuery{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParseComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ReadyForQuery{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{PreparedStatement: "second"}); err != nil {
+		t.Fatalf("second pipeline batch was lost: %v", err)
+	}
+}
+
+func TestStatementDescribeCachesWildcardOriginsForLaterExecute(t *testing.T) {
+	m := machine(t)
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "wild", Query: `SELECT * FROM users`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParseComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Describe{ObjectType: 'S', Name: "wild"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParameterDescription{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{
+		{Name: []byte("id"), TableOID: 42, TableAttributeNumber: 1, Format: pgproto3.TextFormat},
+		{Name: []byte("email"), TableOID: 42, TableAttributeNumber: 7, Format: pgproto3.TextFormat},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Bind{DestinationPortal: "wild", PreparedStatement: "wild"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.BindComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Execute{Portal: "wild"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := recordcrypt.Context{Domain: "tenant-a", Schema: "public", Table: "users", Column: "email"}
+	ciphertext, err := m.keyring.EncryptRandom(ctx, []byte("cached@example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := m.Backend(&pgproto3.DataRow{Values: [][]byte{[]byte("1"), []byte(ciphertext)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(row.(*pgproto3.DataRow).Values[1]); got != "cached@example.com" {
+		t.Fatalf("prepared result metadata was not reused: %q", got)
+	}
+	if _, err := m.Backend(&pgproto3.CommandComplete{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDescribeNoDataMaintainsQueueOrder(t *testing.T) {
+	m := machine(t)
+	if _, err := m.Frontend(&pgproto3.Parse{Name: "delete", Query: `DELETE FROM users WHERE email = $1`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParseComplete{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Describe{ObjectType: 'S', Name: "delete"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{25}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.NoData{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Frontend(&pgproto3.Sync{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Backend(&pgproto3.ReadyForQuery{}); err != nil {
+		t.Fatal(err)
+	}
+}

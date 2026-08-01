@@ -25,17 +25,38 @@ type Machine struct {
 	domain     string
 	origins    OriginResolver
 	metrics    *telemetry.Metrics
-	statements map[string]querymap.Plan
-	portals    map[string]querymap.Plan
-
-	describePlan *querymap.Plan
-	activePlan   *querymap.Plan
-	activeRules  []querymap.ResultRule
-	pending      []pendingChange
+	statements map[string]*plannedObject
+	portals    map[string]*plannedObject
+	responses  []responseState
 }
 
-type pendingChange struct {
-	kind     string
+type plannedObject struct {
+	plan    querymap.Plan
+	results *resultMetadata
+}
+
+type resultMetadata struct {
+	rules    []querymap.ResultRule
+	resolved bool
+}
+
+type responseKind uint8
+
+const (
+	responseParse responseKind = iota + 1
+	responseBind
+	responseDescribeStatement
+	responseDescribePortal
+	responseExecute
+	responseSimpleQuery
+	responseClose
+	responseReady
+)
+
+type responseState struct {
+	kind     responseKind
+	object   *plannedObject
+	rules    []querymap.ResultRule
 	rollback func()
 }
 
@@ -49,8 +70,7 @@ func New(catalog *policy.Catalog, keyring *recordcrypt.Keyring, origins OriginRe
 	}
 	return &Machine{
 		catalog: catalog, keyring: keyring, domain: catalog.KeyDomain(), origins: origins,
-		metrics:    metrics,
-		statements: make(map[string]querymap.Plan), portals: make(map[string]querymap.Plan),
+		metrics: metrics, statements: make(map[string]*plannedObject), portals: make(map[string]*plannedObject),
 	}, nil
 }
 
@@ -69,6 +89,7 @@ func (m *Machine) Frontend(message pgproto3.FrontendMessage) (pgproto3.FrontendM
 	case *pgproto3.Close:
 		return m.close(msg)
 	case *pgproto3.Sync:
+		m.responses = append(m.responses, responseState{kind: responseReady})
 		return message, nil
 	default:
 		return message, nil
@@ -83,18 +104,23 @@ func (m *Machine) Backend(message pgproto3.BackendMessage) (pgproto3.BackendMess
 		}
 		return message, nil
 	case *pgproto3.ParameterDescription:
-		if m.describePlan == nil {
-			return message, nil
+		current, err := m.current(responseDescribeStatement)
+		if err != nil {
+			return nil, err
 		}
-		if len(msg.ParameterOIDs) != m.describePlan.ParameterCount {
+		if len(msg.ParameterOIDs) != current.object.plan.ParameterCount {
 			return nil, fmt.Errorf("%w: backend ParameterDescription does not match transformed plan", ErrProtocolSafety)
 		}
 		copyMessage := *msg
-		copyMessage.ParameterOIDs = append([]uint32(nil), msg.ParameterOIDs[:m.describePlan.OriginalParameterCount]...)
+		copyMessage.ParameterOIDs = append([]uint32(nil), msg.ParameterOIDs[:current.object.plan.OriginalParameterCount]...)
 		return &copyMessage, nil
 	case *pgproto3.DataRow:
-		protectedOrdinals := make(map[int]struct{}, len(m.activeRules))
-		for _, rule := range m.activeRules {
+		current, err := m.currentExecution()
+		if err != nil {
+			return nil, err
+		}
+		protectedOrdinals := make(map[int]struct{}, len(current.rules))
+		for _, rule := range current.rules {
 			protectedOrdinals[rule.Ordinal] = struct{}{}
 		}
 		for ordinal, value := range msg.Values {
@@ -102,10 +128,10 @@ func (m *Machine) Backend(message pgproto3.BackendMessage) (pgproto3.BackendMess
 				return nil, fmt.Errorf("%w: encrypted envelope appeared in an unproven result column", ErrProtocolSafety)
 			}
 		}
-		if len(m.activeRules) == 0 {
+		if len(current.rules) == 0 {
 			return message, nil
 		}
-		values, err := querymap.ApplyResults(m.activeRules, m.keyring, m.domain, msg.Values)
+		values, err := querymap.ApplyResults(current.rules, m.keyring, m.domain, msg.Values)
 		if err != nil {
 			return nil, fmt.Errorf("%w: decrypt backend row: %v", ErrProtocolSafety, err)
 		}
@@ -113,36 +139,27 @@ func (m *Machine) Backend(message pgproto3.BackendMessage) (pgproto3.BackendMess
 		copyMessage.Values = values
 		return &copyMessage, nil
 	case *pgproto3.ParseComplete:
-		if err := m.commit("parse"); err != nil {
-			return nil, err
-		}
-		return message, nil
+		return message, m.complete(responseParse)
 	case *pgproto3.BindComplete:
-		if err := m.commit("bind"); err != nil {
-			return nil, err
-		}
-		return message, nil
+		return message, m.complete(responseBind)
 	case *pgproto3.CloseComplete:
-		if err := m.commit("close"); err != nil {
+		return message, m.complete(responseClose)
+	case *pgproto3.NoData:
+		if len(m.responses) == 0 || (m.responses[0].kind != responseDescribeStatement && m.responses[0].kind != responseDescribePortal) {
+			return nil, fmt.Errorf("%w: unexpected NoData", ErrProtocolSafety)
+		}
+		m.responses = m.responses[1:]
+		return message, nil
+	case *pgproto3.CommandComplete, *pgproto3.EmptyQueryResponse, *pgproto3.PortalSuspended:
+		if err := m.completeExecution(); err != nil {
 			return nil, err
 		}
-		return message, nil
-	case *pgproto3.CommandComplete, *pgproto3.EmptyQueryResponse:
-		m.finishResult()
 		return message, nil
 	case *pgproto3.ErrorResponse:
-		m.rollbackPending()
-		m.finishResult()
-		m.describePlan = nil
+		m.failUntilReady()
 		return message, nil
 	case *pgproto3.ReadyForQuery:
-		if len(m.pending) != 0 {
-			m.rollbackPending()
-			return nil, fmt.Errorf("%w: backend reached ReadyForQuery with unconfirmed protocol changes", ErrProtocolSafety)
-		}
-		m.finishResult()
-		m.describePlan = nil
-		return message, nil
+		return message, m.complete(responseReady)
 	default:
 		return message, nil
 	}
@@ -165,8 +182,9 @@ func (m *Machine) parse(msg *pgproto3.Parse) (pgproto3.FrontendMessage, error) {
 	}
 	name := msg.Name
 	previous, existed := m.statements[name]
-	m.statements[name] = plan
-	m.pending = append(m.pending, pendingChange{kind: "parse", rollback: func() {
+	object := &plannedObject{plan: plan, results: &resultMetadata{rules: append([]querymap.ResultRule(nil), plan.Results...), resolved: !plan.ResolveResultOrigins}}
+	m.statements[name] = object
+	m.responses = append(m.responses, responseState{kind: responseParse, object: object, rollback: func() {
 		if existed {
 			m.statements[name] = previous
 		} else {
@@ -177,10 +195,11 @@ func (m *Machine) parse(msg *pgproto3.Parse) (pgproto3.FrontendMessage, error) {
 }
 
 func (m *Machine) bind(msg *pgproto3.Bind) (pgproto3.FrontendMessage, error) {
-	plan, ok := m.statements[msg.PreparedStatement]
+	statement, ok := m.statements[msg.PreparedStatement]
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown prepared statement %q", ErrProtocolSafety, msg.PreparedStatement)
 	}
+	plan := statement.plan
 	formats, err := expandFormats(msg.ParameterFormatCodes, plan.OriginalParameterCount)
 	if err != nil {
 		return nil, err
@@ -207,8 +226,9 @@ func (m *Machine) bind(msg *pgproto3.Bind) (pgproto3.FrontendMessage, error) {
 	copyMessage.ResultFormatCodes = resultFormats
 	portalName := msg.DestinationPortal
 	previous, existed := m.portals[portalName]
-	m.portals[portalName] = plan
-	m.pending = append(m.pending, pendingChange{kind: "bind", rollback: func() {
+	portal := &plannedObject{plan: plan, results: statement.results}
+	m.portals[portalName] = portal
+	m.responses = append(m.responses, responseState{kind: responseBind, object: portal, rollback: func() {
 		if existed {
 			m.portals[portalName] = previous
 		} else {
@@ -219,30 +239,31 @@ func (m *Machine) bind(msg *pgproto3.Bind) (pgproto3.FrontendMessage, error) {
 }
 
 func (m *Machine) describe(msg *pgproto3.Describe) (pgproto3.FrontendMessage, error) {
-	var plan querymap.Plan
+	var object *plannedObject
 	var ok bool
+	kind := responseDescribeStatement
 	switch msg.ObjectType {
 	case 'S':
-		plan, ok = m.statements[msg.Name]
+		object, ok = m.statements[msg.Name]
 	case 'P':
-		plan, ok = m.portals[msg.Name]
+		object, ok = m.portals[msg.Name]
+		kind = responseDescribePortal
 	default:
 		return nil, fmt.Errorf("%w: invalid Describe object type", ErrProtocolSafety)
 	}
 	if !ok {
 		return nil, fmt.Errorf("%w: Describe references unknown object %q", ErrProtocolSafety, msg.Name)
 	}
-	m.describePlan = &plan
+	m.responses = append(m.responses, responseState{kind: kind, object: object})
 	return msg, nil
 }
 
 func (m *Machine) execute(msg *pgproto3.Execute) (pgproto3.FrontendMessage, error) {
-	plan, ok := m.portals[msg.Portal]
+	portal, ok := m.portals[msg.Portal]
 	if !ok {
 		return nil, fmt.Errorf("%w: Execute references unknown portal %q", ErrProtocolSafety, msg.Portal)
 	}
-	m.activePlan = &plan
-	m.activeRules = append([]querymap.ResultRule(nil), plan.Results...)
+	m.responses = append(m.responses, responseState{kind: responseExecute, object: portal})
 	return msg, nil
 }
 
@@ -257,8 +278,8 @@ func (m *Machine) query(msg *pgproto3.Query) (pgproto3.FrontendMessage, error) {
 	}
 	copyMessage := *msg
 	copyMessage.String = plan.SQL
-	m.activePlan = &plan
-	m.activeRules = append([]querymap.ResultRule(nil), plan.Results...)
+	object := &plannedObject{plan: plan, results: &resultMetadata{rules: append([]querymap.ResultRule(nil), plan.Results...), resolved: !plan.ResolveResultOrigins}}
+	m.responses = append(m.responses, responseState{kind: responseSimpleQuery, object: object, rules: append([]querymap.ResultRule(nil), plan.Results...)}, responseState{kind: responseReady})
 	return &copyMessage, nil
 }
 
@@ -268,7 +289,7 @@ func (m *Machine) close(msg *pgproto3.Close) (pgproto3.FrontendMessage, error) {
 		name := msg.Name
 		previous, existed := m.statements[name]
 		delete(m.statements, name)
-		m.pending = append(m.pending, pendingChange{kind: "close", rollback: func() {
+		m.responses = append(m.responses, responseState{kind: responseClose, rollback: func() {
 			if existed {
 				m.statements[name] = previous
 			}
@@ -277,7 +298,7 @@ func (m *Machine) close(msg *pgproto3.Close) (pgproto3.FrontendMessage, error) {
 		name := msg.Name
 		previous, existed := m.portals[name]
 		delete(m.portals, name)
-		m.pending = append(m.pending, pendingChange{kind: "close", rollback: func() {
+		m.responses = append(m.responses, responseState{kind: responseClose, rollback: func() {
 			if existed {
 				m.portals[name] = previous
 			}
@@ -289,14 +310,14 @@ func (m *Machine) close(msg *pgproto3.Close) (pgproto3.FrontendMessage, error) {
 }
 
 func (m *Machine) rowDescription(description *pgproto3.RowDescription) error {
-	plan := m.activePlan
-	if m.describePlan != nil {
-		plan = m.describePlan
-		m.describePlan = nil
+	if len(m.responses) == 0 {
+		return fmt.Errorf("%w: unexpected RowDescription", ErrProtocolSafety)
 	}
-	if plan == nil {
-		return nil
+	current := &m.responses[0]
+	if current.kind != responseDescribeStatement && current.kind != responseDescribePortal && current.kind != responseSimpleQuery && current.kind != responseExecute {
+		return fmt.Errorf("%w: RowDescription does not match the pending protocol operation", ErrProtocolSafety)
 	}
+	plan := current.object.plan
 	rules := append([]querymap.ResultRule(nil), plan.Results...)
 	if plan.ResolveResultOrigins {
 		if m.origins == nil {
@@ -326,9 +347,14 @@ func (m *Machine) rowDescription(description *pgproto3.RowDescription) error {
 			return fmt.Errorf("%w: protected result column %d uses binary format", ErrProtocolSafety, rule.Ordinal)
 		}
 	}
-	m.activeRules = rules
+	current.rules = append([]querymap.ResultRule(nil), rules...)
+	current.object.results.rules = append([]querymap.ResultRule(nil), rules...)
+	current.object.results.resolved = true
 	if m.metrics != nil {
 		m.metrics.ResultValuesDecrypted.Add(uint64(len(rules)))
+	}
+	if current.kind == responseDescribeStatement || current.kind == responseDescribePortal {
+		m.responses = m.responses[1:]
 	}
 	return nil
 }
@@ -339,25 +365,63 @@ func (m *Machine) observePlan(plan querymap.Plan) {
 	}
 }
 
-func (m *Machine) finishResult() {
-	m.activePlan = nil
-	m.activeRules = nil
+func (m *Machine) current(kind responseKind) (*responseState, error) {
+	if len(m.responses) == 0 || m.responses[0].kind != kind {
+		return nil, fmt.Errorf("%w: backend response does not match the pending protocol operation", ErrProtocolSafety)
+	}
+	return &m.responses[0], nil
 }
 
-func (m *Machine) commit(kind string) error {
-	if len(m.pending) == 0 || m.pending[0].kind != kind {
-		m.rollbackPending()
-		return fmt.Errorf("%w: unexpected %s completion", ErrProtocolSafety, kind)
+func (m *Machine) currentExecution() (*responseState, error) {
+	if len(m.responses) == 0 || (m.responses[0].kind != responseExecute && m.responses[0].kind != responseSimpleQuery) {
+		return nil, fmt.Errorf("%w: DataRow has no matching execution", ErrProtocolSafety)
 	}
-	m.pending = m.pending[1:]
+	current := &m.responses[0]
+	if current.object.plan.ResolveResultOrigins && !current.object.results.resolved {
+		return nil, fmt.Errorf("%w: wildcard result metadata was not proven before DataRow", ErrProtocolSafety)
+	}
+	if current.rules == nil {
+		current.rules = append([]querymap.ResultRule(nil), current.object.results.rules...)
+	}
+	return current, nil
+}
+
+func (m *Machine) complete(kind responseKind) error {
+	current, err := m.current(kind)
+	if err != nil {
+		return err
+	}
+	current.rollback = nil
+	m.responses = m.responses[1:]
 	return nil
 }
 
-func (m *Machine) rollbackPending() {
-	for i := len(m.pending) - 1; i >= 0; i-- {
-		m.pending[i].rollback()
+func (m *Machine) completeExecution() error {
+	if len(m.responses) == 0 || (m.responses[0].kind != responseExecute && m.responses[0].kind != responseSimpleQuery) {
+		return fmt.Errorf("%w: result completion has no matching execution", ErrProtocolSafety)
 	}
-	m.pending = nil
+	m.responses = m.responses[1:]
+	return nil
+}
+
+func (m *Machine) failUntilReady() {
+	boundary := len(m.responses)
+	for index, response := range m.responses {
+		if response.kind == responseReady {
+			boundary = index
+			break
+		}
+	}
+	for index := boundary - 1; index >= 0; index-- {
+		if m.responses[index].rollback != nil {
+			m.responses[index].rollback()
+		}
+	}
+	if boundary == len(m.responses) {
+		m.responses = nil
+		return
+	}
+	m.responses = m.responses[boundary:]
 }
 
 func expandFormats(input []int16, count int) ([]int16, error) {

@@ -15,15 +15,25 @@ import (
 )
 
 type Config struct {
-	Listen      string    `yaml:"listen"`
-	Health      string    `yaml:"health"`
-	Upstream    Upstream  `yaml:"upstream"`
-	ClientTLS   ServerTLS `yaml:"clientTLS"`
-	PolicyFile  string    `yaml:"policyFile"`
-	BundleFile  string    `yaml:"bundleFile"`
-	MetadataDSN string    `yaml:"metadataDSNEnv"`
-	KMS         KMS       `yaml:"kms"`
-	Limits      Limits    `yaml:"limits"`
+	Listen         string         `yaml:"listen"`
+	Health         string         `yaml:"health"`
+	Upstream       Upstream       `yaml:"upstream"`
+	ClientTLS      ServerTLS      `yaml:"clientTLS"`
+	Authentication Authentication `yaml:"authentication"`
+	PolicyFile     string         `yaml:"policyFile"`
+	BundleFile     string         `yaml:"bundleFile"`
+	MetadataDSN    string         `yaml:"metadataDSNEnv"`
+	KMS            KMS            `yaml:"kms"`
+	Limits         Limits         `yaml:"limits"`
+}
+
+type Authentication struct {
+	Mode                string `yaml:"mode"`
+	ClientUsername      string `yaml:"clientUsername,omitempty"`
+	ClientPasswordEnv   string `yaml:"clientPasswordEnv,omitempty"`
+	UpstreamUsername    string `yaml:"upstreamUsername,omitempty"`
+	UpstreamPasswordEnv string `yaml:"upstreamPasswordEnv,omitempty"`
+	UpstreamDatabase    string `yaml:"upstreamDatabase,omitempty"`
 }
 
 type Upstream struct {
@@ -34,10 +44,14 @@ type Upstream struct {
 }
 
 type ServerTLS struct {
-	Required bool   `yaml:"required"`
+	Required *bool  `yaml:"required,omitempty"`
 	CertFile string `yaml:"certFile,omitempty"`
 	KeyFile  string `yaml:"keyFile,omitempty"`
 	CAFile   string `yaml:"clientCAFile,omitempty"`
+}
+
+func (s ServerTLS) IsRequired() bool {
+	return s.Required == nil || *s.Required
 }
 
 type KMS struct {
@@ -65,8 +79,9 @@ type Azure struct {
 }
 
 type Limits struct {
-	MessageBytes int      `yaml:"messageBytes,omitempty"`
-	DialTimeout  Duration `yaml:"dialTimeout,omitempty"`
+	MessageBytes   int      `yaml:"messageBytes,omitempty"`
+	MaxConnections int      `yaml:"maxConnections,omitempty"`
+	DialTimeout    Duration `yaml:"dialTimeout,omitempty"`
 }
 
 type Duration time.Duration
@@ -114,6 +129,21 @@ func (c *Config) Validate() error {
 	if c.Upstream.Address == "" || c.PolicyFile == "" || c.BundleFile == "" || c.MetadataDSN == "" {
 		return errors.New("config: upstream.address, policyFile, bundleFile and metadataDSNEnv are required")
 	}
+	if c.Authentication.Mode == "" {
+		c.Authentication.Mode = "terminate-scram"
+	}
+	switch c.Authentication.Mode {
+	case "relay":
+	case "terminate-scram":
+		if !c.ClientTLS.IsRequired() {
+			return errors.New("config: terminate-scram authentication requires client TLS")
+		}
+		if c.Authentication.ClientUsername == "" || c.Authentication.ClientPasswordEnv == "" || c.Authentication.UpstreamUsername == "" || c.Authentication.UpstreamPasswordEnv == "" || c.Authentication.UpstreamDatabase == "" {
+			return errors.New("config: terminate-scram requires clientUsername, clientPasswordEnv, upstreamUsername, upstreamPasswordEnv and upstreamDatabase")
+		}
+	default:
+		return fmt.Errorf("config: unsupported authentication.mode %q", c.Authentication.Mode)
+	}
 	if c.KMS.KeyRef == "" {
 		return errors.New("config: kms.keyRef is required")
 	}
@@ -134,7 +164,7 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: unsupported kms.provider %q", c.KMS.Provider)
 	}
-	if c.ClientTLS.Required && (c.ClientTLS.CertFile == "" || c.ClientTLS.KeyFile == "") {
+	if c.ClientTLS.IsRequired() && (c.ClientTLS.CertFile == "" || c.ClientTLS.KeyFile == "") {
 		return errors.New("config: required client TLS needs certFile and keyFile")
 	}
 	if (c.ClientTLS.CertFile == "") != (c.ClientTLS.KeyFile == "") {
@@ -148,6 +178,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MessageBytes < 1<<20 || c.Limits.MessageBytes > 1<<30 {
 		return errors.New("config: limits.messageBytes must be between 1 MiB and 1 GiB")
+	}
+	if c.Limits.MaxConnections == 0 {
+		c.Limits.MaxConnections = 1024
+	}
+	if c.Limits.MaxConnections < 1 || c.Limits.MaxConnections > 100_000 {
+		return errors.New("config: limits.maxConnections must be between 1 and 100000")
 	}
 	if c.Limits.DialTimeout == 0 {
 		c.Limits.DialTimeout = Duration(10 * time.Second)

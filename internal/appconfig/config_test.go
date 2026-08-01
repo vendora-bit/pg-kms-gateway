@@ -17,6 +17,8 @@ upstream:
   serverName: "postgres.internal"
 clientTLS:
   required: false
+authentication:
+  mode: relay
 policyFile: "/etc/pgkms/policy.yaml"
 bundleFile: "/etc/pgkms/bundle.json"
 metadataDSNEnv: "PGKMS_METADATA_DSN"
@@ -55,5 +57,34 @@ surprise: true
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown key was accepted")
+	}
+}
+
+func TestClientTLSIsRequiredByDefault(t *testing.T) {
+	config := Config{
+		Upstream: Upstream{Address: "db:5432"}, PolicyFile: "policy.yaml", BundleFile: "bundle.json", MetadataDSN: "DSN",
+		KMS:            KMS{Provider: "vault-transit", KeyRef: "key", Vault: Vault{Address: "https://vault", TokenEnv: "TOKEN"}},
+		Authentication: Authentication{Mode: "relay"},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("configuration without client TLS credentials was accepted")
+	}
+	allowPlaintext := false
+	config.ClientTLS.Required = &allowPlaintext
+	if err := config.Validate(); err != nil {
+		t.Fatalf("explicit plaintext opt-out was rejected: %v", err)
+	}
+}
+
+func TestTerminateSCRAMRequiresSeparateCredentials(t *testing.T) {
+	required := true
+	config := Config{
+		Upstream: Upstream{Address: "db:5432"}, ClientTLS: ServerTLS{Required: &required, CertFile: "tls.crt", KeyFile: "tls.key"},
+		Authentication: Authentication{Mode: "terminate-scram"},
+		PolicyFile:     "policy.yaml", BundleFile: "bundle.json", MetadataDSN: "DSN",
+		KMS: KMS{Provider: "vault-transit", KeyRef: "key", Vault: Vault{Address: "https://vault", TokenEnv: "TOKEN"}},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("termination without independent credentials was accepted")
 	}
 }

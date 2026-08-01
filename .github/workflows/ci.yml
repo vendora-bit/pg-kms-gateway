@@ -23,10 +23,22 @@ jobs:
         run: go test -race -coverprofile=coverage.out ./...
       - name: vet
         run: go vet ./...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          staticcheck ./...
+      - name: vulnerability database
+        uses: golang/govulncheck-action@v1
+        with:
+          go-package: ./...
       - name: build
         run: go build -trimpath ./cmd/pg-kms-gateway
       - name: fuzz smoke
-        run: go test ./internal/recordcrypt -run '^$' -fuzz FuzzParseNeverPanics -fuzztime 20s
+        run: |
+          go test ./internal/recordcrypt -run '^$' -fuzz FuzzParseNeverPanics -fuzztime 20s
+          go test ./internal/querymap -run '^$' -fuzz FuzzProtectedPredicateExpressionsFailClosed -fuzztime 20s
+      - name: application profile corpus
+        run: go run ./cmd/pg-kms-gateway corpus-verify --policy profiles/keycloak/26/policy.yaml --corpus profiles/keycloak/26/corpus.json
       - uses: actions/upload-artifact@v4
         with:
           name: coverage

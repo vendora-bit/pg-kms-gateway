@@ -12,25 +12,30 @@ spec:
   ingress:
     - from:
         - namespaceSelector:
-            {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 12 }}
+            {{- required "networkPolicy.ingressNamespaceSelector is required" .Values.networkPolicy.ingressNamespaceSelector | toYaml | nindent 12 }}
       ports:
         - {port: 6432, protocol: TCP}
+    - from:
+        - namespaceSelector:
+            {{- required "networkPolicy.healthNamespaceSelector is required" .Values.networkPolicy.healthNamespaceSelector | toYaml | nindent 12 }}
+      ports:
         - {port: 8080, protocol: TCP}
   egress:
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            {{- required "networkPolicy.dnsNamespaceSelector is required" .Values.networkPolicy.dnsNamespaceSelector | toYaml | nindent 12 }}
       ports:
         - {port: 53, protocol: UDP}
         - {port: 53, protocol: TCP}
     - to:
         - namespaceSelector:
-            {{- toYaml .Values.networkPolicy.upstreamNamespaceSelector | nindent 12 }}
+            {{- required "networkPolicy.upstreamNamespaceSelector is required" .Values.networkPolicy.upstreamNamespaceSelector | toYaml | nindent 12 }}
       ports:
         - {port: {{ .Values.networkPolicy.upstreamPort }}, protocol: TCP}
     {{- if eq .Values.config.kmsProvider "vault-transit" }}
     - to:
         - namespaceSelector:
-            {{- toYaml .Values.networkPolicy.kmsNamespaceSelector | nindent 12 }}
+            {{- required "networkPolicy.kmsNamespaceSelector is required" .Values.networkPolicy.kmsNamespaceSelector | toYaml | nindent 12 }}
       ports:
         - {port: {{ .Values.networkPolicy.vaultPort }}, protocol: TCP}
     {{- end }}

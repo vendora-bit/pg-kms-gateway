@@ -1,3 +1,6 @@
+{{- if and .Values.config.clientTLSRequired (not .Values.secrets.clientTLSSecretName) }}
+{{- fail "secrets.clientTLSSecretName is required when config.clientTLSRequired=true" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,10 +19,22 @@ data:
       caFile: /etc/pgkms/upstream-ca/ca.crt
       {{- end }}
     clientTLS:
-      required: {{ ne .Values.secrets.clientTLSSecretName "" }}
+      required: {{ .Values.config.clientTLSRequired }}
       {{- if .Values.secrets.clientTLSSecretName }}
       certFile: /etc/pgkms/client-tls/tls.crt
       keyFile: /etc/pgkms/client-tls/tls.key
+      {{- if .Values.secrets.clientTLSClientCAKey }}
+      clientCAFile: /etc/pgkms/client-tls/{{ .Values.secrets.clientTLSClientCAKey }}
+      {{- end }}
+      {{- end }}
+    authentication:
+      mode: {{ .Values.config.authenticationMode | quote }}
+      {{- if eq .Values.config.authenticationMode "terminate-scram" }}
+      clientUsername: {{ required "config.clientUsername is required for terminate-scram" .Values.config.clientUsername | quote }}
+      clientPasswordEnv: {{ .Values.config.clientPasswordEnv | quote }}
+      upstreamUsername: {{ required "config.upstreamUsername is required for terminate-scram" .Values.config.upstreamUsername | quote }}
+      upstreamPasswordEnv: {{ .Values.config.upstreamPasswordEnv | quote }}
+      upstreamDatabase: {{ required "config.upstreamDatabase is required for terminate-scram" .Values.config.upstreamDatabase | quote }}
       {{- end }}
     policyFile: /etc/pgkms/policy/policy.yaml
     bundleFile: /etc/pgkms/bundle/bundle.json
@@ -42,6 +57,7 @@ data:
       {{- end }}
     limits:
       messageBytes: {{ .Values.config.messageBytes }}
+      maxConnections: {{ .Values.config.maxConnections }}
       dialTimeout: {{ .Values.config.dialTimeout }}
   policy.yaml: |
     {{- required "policy must be supplied" .Values.policy | nindent 4 }}

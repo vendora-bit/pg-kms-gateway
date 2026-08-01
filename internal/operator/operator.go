@@ -107,6 +107,24 @@ type Engine struct {
 	BatchSize  int
 }
 
+func (e *Engine) RunAndVerifyField(ctx context.Context, field policy.Field, mode Mode) (Stats, Verification, error) {
+	stats, err := e.RunField(ctx, field, mode)
+	if err != nil {
+		return stats, Verification{}, err
+	}
+	verification, err := e.VerifyField(ctx, field)
+	if err != nil {
+		return stats, verification, fmt.Errorf("operator: verify %s.%s.%s after %s: %w", field.Schema, field.Table, field.Column, mode, err)
+	}
+	if !verification.Clean() {
+		return stats, verification, fmt.Errorf(
+			"operator: verification after %s failed for %s.%s.%s: plaintext=%d old_key=%d invalid=%d blind_mismatch=%d",
+			mode, field.Schema, field.Table, field.Column, verification.PlaintextRows, verification.OldKeyRows, verification.InvalidRows, verification.BlindMismatch,
+		)
+	}
+	return stats, verification, nil
+}
+
 func (e *Engine) RunField(ctx context.Context, field policy.Field, mode Mode) (Stats, error) {
 	if e.Connection == nil {
 		return Stats{}, errors.New("operator: PostgreSQL connection is required")

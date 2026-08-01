@@ -9,6 +9,13 @@ clientTLS:
   required: true
   certFile: "/etc/pgkms/tls/tls.crt"
   keyFile: "/etc/pgkms/tls/tls.key"
+authentication:
+  mode: terminate-scram
+  clientUsername: application
+  clientPasswordEnv: PGKMS_CLIENT_PASSWORD
+  upstreamUsername: pg_kms_gateway
+  upstreamPasswordEnv: PGKMS_UPSTREAM_PASSWORD
+  upstreamDatabase: app
 policyFile: "/etc/pgkms/policy/policy.yaml"
 bundleFile: "/etc/pgkms/bundle/bundle.json"
 metadataDSNEnv: "PGKMS_METADATA_DSN"
@@ -21,4 +28,5 @@ kms:
     tokenEnv: "VAULT_TOKEN"
 limits:
   messageBytes: 67108864
+  maxConnections: 1024
   dialTimeout: 10s
