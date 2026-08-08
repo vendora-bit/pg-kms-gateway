@@ -39,7 +39,7 @@ jobs:
           go test ./internal/querymap -run '^$' -fuzz FuzzProtectedPredicateExpressionsFailClosed -fuzztime 20s
       - name: application profile corpus
         run: go run ./cmd/pg-kms-gateway corpus-verify --policy profiles/keycloak/26/policy.yaml --corpus profiles/keycloak/26/corpus.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.out
